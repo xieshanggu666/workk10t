@@ -3,8 +3,9 @@ import { ref, computed } from 'vue'
 import { db } from '@/db'
 import { uid } from '@/utils/format'
 import { ensureVersions, docSnapshot, diffVersionFields, applyRestoreBoundary, restoreRollbackInfo } from '@/utils/version'
-import { REVIEW, PUBLISH, buildTimelineEntry, canSubmitReview, canReviewDecision } from '@/utils/review'
+import { REVIEW, PUBLISH, buildTimelineEntry, canSubmitReview, canReviewDecision, isCorrectionReview } from '@/utils/review'
 import { GAP } from '@/utils/gap'
+import { CORRECTION } from '@/utils/correction'
 import { canEditContent, GUEST_ID } from '@/utils/permission'
 import { isGrantActive, ACCESS_PERM } from '@/utils/access'
 import { isFreshReview, isFreshNoChangeReview } from '@/utils/review'
@@ -12,6 +13,7 @@ import { isDocOverride, materializeFromPolicy, isFreshTicketOpen } from '@/utils
 import { useKbStore } from './kb'
 import { useGapStore } from './gap'
 import { useFreshnessStore } from './freshness'
+import { useCorrectionStore } from './correction'
 
 // 知识文档评审流程 store：
 // 发起（快照待审内容、文档置为评审中并锁定）→ 成员发表评审意见 →
@@ -303,6 +305,77 @@ export const useReviewStore = defineStore('review', () => {
     return result
   }
 
+  // 纠错工单「修订送审」：创建评审单、锁定文档、工单置为送审中，在同一事务内完成。
+  // 任一步失败（含工单被退回/撤单、他人抢先送审等并发变化）整体回滚，不留孤立评审单或失效关联；
+  // 与审批/撤回事务互斥，工单不会卡在送审中。评审单带 correctionTicketId 与纠错单关联，
+  // 审批结论经 syncCorrectionTicket 在决策的同一事务内联动工单。
+  async function submitCorrectionReview(ticketId, patch, note, currentUser) {
+    const kb = useKbStore()
+    const correction = useCorrectionStore()
+    await kb.loadAll()
+    await loadAll()
+    const now = new Date().toISOString()
+    const userId = currentUser?.id || GUEST_ID
+    const isAdmin = currentUser?.role === 'admin'
+    let result = { status: 'error' }
+    let submittedComment = null
+
+    try {
+      await db.transaction('rw', db.docs, db.reviews, db.comments, db.correctionTickets, db.accessRequests, async () => {
+        if (userId === GUEST_ID || !canEditContent(currentUser?.role)) { result = { status: 'guest' }; return }
+        const ticket = await db.correctionTickets.get(ticketId)
+        if (!ticket) { result = { status: 'ticket-missing' }; return }
+        if (ticket.status !== CORRECTION.CLAIMED || (ticket.claimedBy !== userId && !isAdmin)) {
+          result = { status: 'ticket-changed', ticket }; return
+        }
+        const doc = await db.docs.get(ticket.docId)
+        if (!doc) { result = { status: 'doc-missing' }; return }
+        const existingPending = await db.reviews
+          .where('docId').equals(ticket.docId)
+          .filter((r) => r.status === REVIEW.PENDING).first()
+        if (existingPending) { result = { status: 'duplicate', review: existingPending }; return }
+        // 送审人仍须对该文档具备评审发起资格（拥有者/协作成员/管理员/限时协作授权）
+        if (!canSubmitReview(doc, { userId, role: currentUser.role, grant: await findCollabGrant(ticket.docId, userId) }, existingPending)) {
+          result = { status: 'denied' }; return
+        }
+
+        const review = {
+          ...buildReviewRecord(ticket.docId, patch, note, userId, now, ensureVersions(doc, now).length),
+          correctionTicketId: ticket.id,
+          correctionSummary: ticket.summary || '',
+          timeline: [buildTimelineEntry('correction-submit', userId, note || ('纠错修订：' + (ticket.summary || '')), now)]
+        }
+        await db.reviews.add(review)
+
+        // 文档进入评审中：正文锁定，旧内容继续可见（问答引用仍暂停，待审批通过后恢复）
+        await db.docs.update(ticket.docId, { publishState: PUBLISH.IN_REVIEW, activeReviewId: review.id })
+
+        await db.correctionTickets.update(ticket.id, {
+          status: CORRECTION.IN_REVIEW,
+          reviewId: review.id,
+          submittedAt: now,
+          timeline: [...(ticket.timeline || []), buildTimelineEntry('submit', userId, '修订内容关联文档《' + (doc.title || ticket.docId) + '》送审', now)]
+        })
+
+        if (note && note.trim()) {
+          submittedComment = {
+            id: uid('cmt'), docId: ticket.docId, reviewId: review.id, authorId: userId,
+            content: note.trim(), mentionIds: [], createdAt: now
+          }
+          await db.comments.add(submittedComment)
+        }
+        result = { status: 'ok', review }
+      })
+    } catch (e) {
+      result = { status: 'error' }
+      submittedComment = null
+    }
+
+    if (result.status === 'ok' && submittedComment) kb.comments.push(submittedComment)
+    await Promise.all([reload(), kb.reloadDocs(), correction.reload()])
+    return result
+  }
+
   // 成员发表评审意见：同时写入 comments（联动评论区）与评审单 timeline（留痕）。
   // 访客（未登录）不可评论；评审单非待审批状态拒绝。
   async function addReviewComment(reviewId, content, mentionIds, currentUser) {
@@ -375,8 +448,10 @@ export const useReviewStore = defineStore('review', () => {
     const now = new Date().toISOString()
     const userId = currentUser?.id || GUEST_ID
     let result = { status: 'error' }
+    // 审批通过后的最新版本号（纠错工单联动回写版本号用；驳回/非回写路径保持 null）
+    let approvedVersionCount = null
 
-    await db.transaction('rw', db.docs, db.reviews, db.gapTickets, db.freshnessTickets, db.freshnessPolicies, async () => {
+    await db.transaction('rw', db.docs, db.reviews, db.gapTickets, db.freshnessTickets, db.freshnessPolicies, db.correctionTickets, async () => {
       const review = await db.reviews.get(reviewId)
       if (!review) { result = { status: 'missing' }; return }
       if (review.status !== REVIEW.PENDING) { result = { status: 'closed', review }; return }
@@ -452,6 +527,20 @@ export const useReviewStore = defineStore('review', () => {
             }
             newVersions = [...versions, versionEntry]
           }
+        } else if (isCorrectionReview(review)) {
+          // 知识纠错修订通过：回写修订快照，追加「纠错修订」版本；问答引用随文档恢复
+          versionEntry = {
+            version: nextVersion,
+            savedAt: now,
+            savedBy: review.submittedBy,
+            note: '知识纠错修订发布' + (review.correctionSummary ? '：' + review.correctionSummary : '') + (note ? '（' + note + '）' : ''),
+            reviewStatus: REVIEW.APPROVED,
+            reviewId,
+            decidedBy: userId,
+            correctionReview: { ticketId: review.correctionTicketId, reviewId },
+            snapshot: { ...review.snapshot }
+          }
+          newVersions = [...versions, versionEntry]
         } else {
           versionEntry = {
             version: nextVersion,
@@ -465,6 +554,7 @@ export const useReviewStore = defineStore('review', () => {
           }
           newVersions = [...versions, versionEntry]
         }
+        approvedVersionCount = newVersions.length
         const fresh = isFreshReview(review)
         const noChangeFresh = isFreshNoChangeReview(review)
         const updated = {
@@ -508,12 +598,22 @@ export const useReviewStore = defineStore('review', () => {
       if (isFreshReview(review)) {
         await useFreshnessStore().syncFreshTicket(review, status === REVIEW.APPROVED ? 'approve' : 'reject', note, userId, now)
       }
+      // 知识纠错联动：通过标记已修正并回写版本号 / 驳回退回修订（同事务）
+      if (isCorrectionReview(review)) {
+        await useCorrectionStore().syncCorrectionTicket(
+          reviewId,
+          status === REVIEW.APPROVED ? 'resolve' : 'return',
+          note, userId, now,
+          status === REVIEW.APPROVED ? approvedVersionCount : null
+        )
+      }
       result = { status: 'ok', review: decided, approved: status === REVIEW.APPROVED }
     })
 
     const gap = useGapStore()
     const freshness = useFreshnessStore()
-    await Promise.all([reload(), kb.reloadDocs(), gap.reload(), freshness.loaded ? freshness.reload() : Promise.resolve()])
+    const correction = useCorrectionStore()
+    await Promise.all([reload(), kb.reloadDocs(), gap.reload(), freshness.loaded ? freshness.reload() : Promise.resolve(), correction.loaded ? correction.reload() : Promise.resolve()])
     return result
   }
 
@@ -525,7 +625,7 @@ export const useReviewStore = defineStore('review', () => {
     const userId = currentUser?.id || GUEST_ID
     let result = { status: 'error' }
 
-    await db.transaction('rw', db.docs, db.reviews, db.gapTickets, db.freshnessTickets, async () => {
+    await db.transaction('rw', db.docs, db.reviews, db.gapTickets, db.freshnessTickets, db.correctionTickets, async () => {
       const review = await db.reviews.get(reviewId)
       if (!review) { result = { status: 'missing' }; return }
       if (userId === GUEST_ID) { result = { status: 'guest' }; return }
@@ -543,12 +643,17 @@ export const useReviewStore = defineStore('review', () => {
       if (isFreshReview(review)) {
         await useFreshnessStore().syncFreshTicket(review, 'withdraw', '', userId, now)
       }
+      // 纠错修订撤回：纠错单回到修订中（问答引用继续暂停），修订后可重新送审
+      if (isCorrectionReview(review)) {
+        await useCorrectionStore().syncCorrectionTicket(reviewId, 'withdraw', '', userId, now)
+      }
       result = { status: 'ok', review: withdrawn }
     })
 
     const gap = useGapStore()
     const freshness = useFreshnessStore()
-    await Promise.all([reload(), kb.reloadDocs(), gap.reload(), freshness.loaded ? freshness.reload() : Promise.resolve()])
+    const correction = useCorrectionStore()
+    await Promise.all([reload(), kb.reloadDocs(), gap.reload(), freshness.loaded ? freshness.reload() : Promise.resolve(), correction.loaded ? correction.reload() : Promise.resolve()])
     return result
   }
 
@@ -564,7 +669,7 @@ export const useReviewStore = defineStore('review', () => {
   return {
     reviews, loaded, loadAll, reload,
     pendingByDoc, pendingReviewOf, reviewsOfDoc, commentsOfReview,
-    submitReview, submitRestoreReview, submitGapReview, addReviewComment, decideReview, withdrawReview,
+    submitReview, submitRestoreReview, submitGapReview, submitCorrectionReview, addReviewComment, decideReview, withdrawReview,
     deleteReviewsOfDoc, pendingCount
   }
 })

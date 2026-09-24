@@ -9,18 +9,21 @@ import { useAccessStore } from '@/stores/access'
 import { useFreshnessStore } from '@/stores/freshness'
 import { useHandoverStore } from '@/stores/handover'
 import { useRetirementStore } from '@/stores/retirement'
+import { useCorrectionStore } from '@/stores/correction'
 import DocPill from '@/components/common/DocPill.vue'
 import MemberSelect from '@/components/common/MemberSelect.vue'
 import ShareDialog from '@/components/doc/ShareDialog.vue'
 import ReviewPanel from '@/components/doc/ReviewPanel.vue'
 import FreshnessPanel from '@/components/doc/FreshnessPanel.vue'
 import RetirementPanel from '@/components/doc/RetirementPanel.vue'
+import CorrectionPanel from '@/components/doc/CorrectionPanel.vue'
 import AccessApplyCard from '@/components/doc/AccessApplyCard.vue'
 import AccessPanel from '@/components/doc/AccessPanel.vue'
 import { formatFull, formatDate, avatarColor } from '@/utils/format'
 import { canEditDoc, canDeleteDoc, canViewDoc, GUEST_ID } from '@/utils/permission'
 import { versionReviewBadge, versionRestoreBadges, canSubmitReview } from '@/utils/review'
 import { freshVersionBadge } from '@/utils/freshness'
+import { correctionStatusLabel } from '@/utils/correction'
 import { diffVersionFields, diffBodyLines, docSnapshot, fieldLabels, versionRangeText } from '@/utils/version'
 import { ACCESS, accessPermLabel, grantExpireText } from '@/utils/access'
 
@@ -34,6 +37,7 @@ const accessStore = useAccessStore()
 const freshnessStore = useFreshnessStore()
 const handoverStore = useHandoverStore()
 const retirementStore = useRetirementStore()
+const correctionStore = useCorrectionStore()
 
 const doc = ref(null)
 const notFound = ref(false)
@@ -133,7 +137,7 @@ async function submitRestore() {
 
 async function refresh() {
   if (!docId.value) return
-  await Promise.all([reviewStore.loadAll(), accessStore.loadAll(), freshnessStore.loadAll(), retirementStore.loadAll()])
+  await Promise.all([reviewStore.loadAll(), accessStore.loadAll(), freshnessStore.loadAll(), retirementStore.loadAll(), correctionStore.loadAll()])
   const d = await kb.getDoc(docId.value)
   if (!d) { notFound.value = true; doc.value = null; return }
   notFound.value = false
@@ -164,6 +168,8 @@ const isOwnerOrAdmin = computed(() => doc.value && (auth.user?.role === 'admin' 
 const activeHandover = computed(() => (doc.value ? handoverStore.activeItemOfDoc(doc.value.id) : null))
 // 知识退役：本文档当前生效退役（已退役则只读，停止搜索/问答，引导至替代文档）
 const activeRetirement = computed(() => (doc.value ? retirementStore.activeRetirementOfDoc(doc.value.id) : null))
+// 知识纠错：本文档流转中的纠错单（存在即代表问答引用暂停，修订审批通过后恢复）
+const activeCorrection = computed(() => (doc.value ? correctionStore.activeTicketOfDoc(doc.value.id) : null))
 
 async function doDelete() {
   if (!confirm('确定删除该文档？此操作不可恢复。')) return
@@ -249,6 +255,10 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
         <span>🗄 本文档已退役（{{ userById[activeRetirement.initiatedBy]?.name || activeRetirement.approvedBy }} 发起，{{ userById[activeRetirement.approvedBy] }} 批准）：已停止搜索与问答引用，正文只读保留。</span>
         <a v-if="kb.docs.find((d) => d.id === activeRetirement.replacementDocId)" class="rt-go" @click="router.push('/docs/' + activeRetirement.replacementDocId)">前往替代文档《{{ activeRetirement.replacementTitle }}》→</a>
       </div>
+      <div v-if="activeCorrection" class="card correction-banner">
+        <span>🩹 知识纠错处理中（{{ correctionStatusLabel(activeCorrection.status) }}）：成员反馈「{{ activeCorrection.summary }}」，修订经管理员审批通过前问答引用已暂停，通过后回写版本并自动恢复。</span>
+        <a class="ct-go" @click="router.push('/corrections')">前往纠错中心 →</a>
+      </div>
       <div class="page-head card">
         <div class="title-row">
           <h1 class="title">{{ doc.title }}</h1>
@@ -280,6 +290,7 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
             <span class="vnote">{{ v.note || '编辑' }}</span>
             <span v-if="versionReviewBadge(v)" class="vbadge" :class="'vb-' + versionReviewBadge(v).cls">{{ versionReviewBadge(v).text }}</span>
             <span v-if="freshVersionBadge(v)" class="vbadge vb-fresh">{{ freshVersionBadge(v).text }}</span>
+            <span v-if="v.correctionReview" class="vbadge vb-correction">纠错修订</span>
             <span v-for="b in versionRestoreBadges(v)" :key="b.text" class="vbadge" :class="'vb-' + b.cls">{{ b.text }}</span>
             <span v-if="!v.snapshot" class="vnosnap" title="旧版本记录未保存内容快照，无法对比或恢复">无快照</span>
           </div>
@@ -347,6 +358,8 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
       <FreshnessPanel :doc="doc" />
 
       <RetirementPanel :doc="doc" />
+
+      <CorrectionPanel :doc="doc" />
 
       <!-- 拥有者/管理员：审批访问申请、管理限时授权（撤销到期同步收回四处权限） -->
       <AccessPanel v-if="isOwnerOrAdmin" :doc="doc" />
@@ -462,6 +475,8 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 .handover-banner { padding: 10px 18px; margin-bottom: 14px; font-size: 13px; color: #9a3412; background: #fff7ed; border-color: #fb923c; }
 .retire-banner { padding: 10px 18px; margin-bottom: 14px; font-size: 13px; color: #475569; background: #f8fafc; border-color: #cbd5e1; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
 .retire-banner .rt-go { color: var(--primary); font-weight: 600; cursor: pointer; white-space: nowrap; }
+.correction-banner { padding: 10px 18px; margin-bottom: 14px; font-size: 13px; color: #86198f; background: #faf5ff; border-color: #d8b4fe; display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.correction-banner .ct-go { color: #c026d3; font-weight: 600; cursor: pointer; white-space: nowrap; }
 .owner-his { margin-right: 14px; color: var(--text-2); }
 .owner-his em { font-style: normal; color: var(--text-3); font-size: 12px; }
 .owner-cur { color: var(--text); font-weight: 600; }
@@ -472,5 +487,6 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 .vb-no { background: #fee2e2; color: #b91c1c; }
 .vb-wait { background: #fef3c7; color: #b45309; }
 .vb-fresh { background: #cffafe; color: #0e7490; }
+.vb-correction { background: #f3e8ff; color: #a21caf; }
 .c-review-tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--primary-weak); color: var(--primary); }
 </style>

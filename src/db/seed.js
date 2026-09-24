@@ -779,9 +779,73 @@ async function ensurePolicySeed() {
   }
 }
 
+// ---- 知识纠错演示（v13 增量种子）----
+// cor-1 待认领（doc-1）：成员发现初始化命令示例有误；
+// cor-2 修订中（doc-8）：编辑者已认领，正在核对安全基线；
+// cor-3 已修正（doc-3 历史纠错，终态，不影响引用）；cor-4 已退回（终态）。
+// 流转中的两张会暂停对应文档问答引用，演示完整的纠错闭环闸门。
+async function ensureCorrectionSeed() {
+  if ((await db.correctionTickets.count()) > 0) return
+  const tl = (action, by, note, at) => ({ action, by, note: note || '', at })
+  await db.correctionTickets.bulkAdd([
+    {
+      id: 'cor-1', docId: 'doc-1', type: 'broken',
+      summary: '初始化命令缺少 @latest，可能装到旧版 Vite',
+      detail: '正文示例 npm create vite@latest 在部分内网源会解析到旧缓存，建议补充 @latest 与 Node 版本要求。',
+      expected: '命令改为 npm create vite@latest，并注明 Node 18+。',
+      status: 'open', submittedBy: 'u-xiaoye', createdAt: ago(1 * d),
+      claimedBy: null, claimedAt: null, reviewId: null, submittedAt: null,
+      resolvedAt: null, resolvedVersion: null, decidedBy: null, decidedAt: null, closeNote: '',
+      timeline: [tl('create', 'u-xiaoye', '关联文档提交纠错（链接/示例失效）', ago(1 * d))]
+    },
+    {
+      id: 'cor-2', docId: 'doc-8', type: 'outdated',
+      summary: '会话过期时间与最新基线不一致',
+      detail: '正文写「会话 14 天过期」，新基线已调整为 7 天，请核对后修订。',
+      expected: '会话有效期改为 7 天，并补充强制下线说明。',
+      status: 'claimed', submittedBy: 'u-mochen', createdAt: ago(3 * d),
+      claimedBy: 'u-chen', claimedAt: ago(2 * d), reviewId: null, submittedAt: null,
+      resolvedAt: null, resolvedVersion: null, decidedBy: null, decidedAt: null, closeNote: '',
+      timeline: [
+        tl('create', 'u-mochen', '关联文档提交纠错（内容过时）', ago(3 * d)),
+        tl('claim', 'u-chen', '', ago(2 * d))
+      ]
+    },
+    {
+      id: 'cor-3', docId: 'doc-3', type: 'typo',
+      summary: '权限点一段「权限」错写为「权现」',
+      detail: '', expected: '',
+      status: 'resolved', submittedBy: 'u-xiaoye', createdAt: ago(20 * d),
+      claimedBy: 'u-chen', claimedAt: ago(19 * d), reviewId: null, submittedAt: ago(18 * d),
+      resolvedAt: ago(17 * d), resolvedVersion: 2, decidedBy: 'u-admin', decidedAt: ago(17 * d),
+      closeNote: '修订已核实发布',
+      timeline: [
+        tl('create', 'u-xiaoye', '关联文档提交纠错（错别字/表述）', ago(20 * d)),
+        tl('claim', 'u-chen', '', ago(19 * d)),
+        tl('submit', 'u-chen', '修订内容关联文档送审', ago(18 * d)),
+        tl('resolve', 'u-admin', '审批通过，修订回写为 v2', ago(17 * d))
+      ]
+    },
+    {
+      id: 'cor-4', docId: 'doc-4', type: 'factual',
+      summary: '评审前 24h 疑似应为 48h',
+      detail: '', expected: '',
+      status: 'revoked', submittedBy: 'u-mochen', createdAt: ago(25 * d),
+      claimedBy: 'u-ziwei', claimedAt: ago(24 * d), reviewId: null, submittedAt: null,
+      resolvedAt: null, resolvedVersion: null, decidedBy: 'u-ziwei', decidedAt: ago(23 * d),
+      closeNote: '核对团队规范后确认 24h 为现行口径，该问题不成立，感谢反馈。',
+      timeline: [
+        tl('create', 'u-mochen', '关联文档提交纠错（事实/数据错误）', ago(25 * d)),
+        tl('claim', 'u-ziwei', '', ago(24 * d)),
+        tl('dismiss', 'u-ziwei', '核对团队规范后确认 24h 为现行口径，该问题不成立，感谢反馈。', ago(23 * d))
+      ]
+    }
+  ])
+}
+
 export async function ensureSeeded() {
   if (await isSeeded()) return
-  await db.transaction('rw', db.users, db.categories, db.tags, db.docs, db.comments, db.shares, db.favorites, db.ratings, db.reviews, db.gapTickets, db.accessRequests, db.freshnessTickets, db.handovers, db.freshnessPolicies, async () => {
+  await db.transaction('rw', db.users, db.categories, db.tags, db.docs, db.comments, db.shares, db.favorites, db.ratings, db.reviews, db.gapTickets, db.accessRequests, db.freshnessTickets, db.handovers, db.freshnessPolicies, db.correctionTickets, async () => {
     if ((await db.users.count()) === 0) {
       await db.users.bulkAdd(seedUsers)
       await db.categories.bulkAdd(seedCategories)
@@ -799,6 +863,7 @@ export async function ensureSeeded() {
     await ensureFreshnessSeed()
     await ensureHandoverSeed()
     await ensurePolicySeed()
+    await ensureCorrectionSeed()
   })
   await setMeta('seeded', SEED_VER)
 }

@@ -10,6 +10,7 @@ import { useAccessStore } from '@/stores/access'
 import { useFreshnessStore } from '@/stores/freshness'
 import { useHandoverStore } from '@/stores/handover'
 import { useRetirementStore } from '@/stores/retirement'
+import { useCorrectionStore } from '@/stores/correction'
 import { canEditContent, canViewDoc, roleLabel } from '@/utils/permission'
 import { avatarColor } from '@/utils/format'
 
@@ -24,6 +25,7 @@ const accessStore = useAccessStore()
 const freshnessStore = useFreshnessStore()
 const handoverStore = useHandoverStore()
 const retirementStore = useRetirementStore()
+const correctionStore = useCorrectionStore()
 
 // 侧栏各文档列表统一过权限：授权撤销/到期后标题也不再从最近浏览/收藏/协作入口泄露
 function visible(d) {
@@ -46,6 +48,14 @@ const handoverPending = computed(() =>
 const retirementPending = computed(() =>
   retirementStore.pendingCountFor(auth.user?.role)
 )
+
+// 知识纠错待办：编辑者看待认领数，管理员看待认领 + 待审批修订数（侧边栏角标）
+const correctionPending = computed(() => {
+  const role = auth.user?.role
+  if (role === 'admin') return correctionStore.openCount + correctionStore.pendingReviewCount
+  if (role === 'editor') return correctionStore.openCount
+  return 0
+})
 
 const catCounts = computed(() => {
   const m = {}
@@ -86,6 +96,9 @@ function goDoc(id) {
       </div>
       <div class="link" :class="{ on: route.name === 'gapTickets' }" @click="go('/gaps', {})">
         📮 缺口工单<span v-if="gapStore.openCount" class="link-badge">{{ gapStore.openCount }}</span>
+      </div>
+      <div class="link" :class="{ on: route.name === 'correctionCenter' }" @click="go('/corrections', {})">
+        🩹 知识纠错<span v-if="correctionPending" class="link-badge correction-badge">{{ correctionPending }}</span>
       </div>
       <div class="link" :class="{ on: route.name === 'accessCenter' }" @click="go('/access', {})">
         🔑 访问授权<span v-if="accessPending" class="link-badge">{{ accessPending }}</span>
@@ -168,6 +181,7 @@ function goDoc(id) {
 .link { position: relative; }
 .link-badge { margin-left: 6px; background: var(--danger); color: #fff; font-size: 11px; border-radius: 999px; padding: 0 7px; min-width: 18px; height: 16px; display: inline-grid; place-items: center; }
 .link-badge.fresh-badge { background: #0e7490; }
+.link-badge.correction-badge { background: #c026d3; }
 
 .section { margin: 4px 0 14px; }
 .section-title { font-size: 12px; color: var(--text-3); padding: 0 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }

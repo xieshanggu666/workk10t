@@ -13,6 +13,7 @@ import { useFreshnessStore } from '@/stores/freshness'
 import { useHandoverStore } from '@/stores/handover'
 import { useRetirementStore } from '@/stores/retirement'
 import { useOrchestrationStore } from '@/stores/orchestration'
+import { useCorrectionStore } from '@/stores/correction'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -25,11 +26,12 @@ const freshnessStore = useFreshnessStore()
 const handoverStore = useHandoverStore()
 const retirementStore = useRetirementStore()
 const orchestrationStore = useOrchestrationStore()
+const correctionStore = useCorrectionStore()
 
 const isSharePage = () => route.name === 'share'
 
 onMounted(async () => {
-  await Promise.all([auth.loadUsers(), kb.loadAll(), reviewStore.loadAll(), gapStore.loadAll(), accessStore.loadAll(), freshnessStore.loadAll(), handoverStore.loadAll(), retirementStore.loadAll(), orchestrationStore.loadAll()])
+  await Promise.all([auth.loadUsers(), kb.loadAll(), reviewStore.loadAll(), gapStore.loadAll(), accessStore.loadAll(), freshnessStore.loadAll(), handoverStore.loadAll(), retirementStore.loadAll(), orchestrationStore.loadAll(), correctionStore.loadAll()])
   // 接管崩溃/刷新前未跑完的分批编排作业（心跳超时，逐篇幂等断点续跑）
   await orchestrationStore.resumeStale()
   // 默认以管理员登录，便于完整演示；可通过「账号与权限」切换角色

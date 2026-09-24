@@ -7,6 +7,7 @@ import { useGapStore } from '@/stores/gap'
 import { useAccessStore } from '@/stores/access'
 import { useFreshnessStore } from '@/stores/freshness'
 import { useRetirementStore } from '@/stores/retirement'
+import { useCorrectionStore } from '@/stores/correction'
 import { canViewDoc } from '@/utils/permission'
 import { isDocCitable } from '@/utils/freshness'
 import { isDocRetireCitable } from '@/utils/retirement'
@@ -24,6 +25,7 @@ const gapStore = useGapStore()
 const accessStore = useAccessStore()
 const freshnessStore = useFreshnessStore()
 const retirementStore = useRetirementStore()
+const correctionStore = useCorrectionStore()
 
 const question = ref('')
 const asked = ref('')
@@ -43,9 +45,11 @@ const suggestions = ['Vue 如何初始化项目?', 'Dexie 怎么进行查询?', 
 function grantOf(d) { return accessStore.grantOf(d.id, auth.user?.id) }
 function freshTicketOf(d) { return freshnessStore.activeTicketOf(d.id) }
 function retirementOf(d) { return retirementStore.activeRetirementOfDoc(d.id) }
+function correctionOf(d) { return correctionStore.activeTicketOfDoc(d.id) }
 const citableNow = (d) =>
   isDocCitable(d, freshTicketOf(d), freshnessStore.now) &&
-  isDocRetireCitable(d, retirementOf(d))
+  isDocRetireCitable(d, retirementOf(d)) &&
+  !correctionOf(d)
 const cites = computed(() => rawCites.value.filter((c) => canViewDoc(c, auth.user?.id, null, grantOf(c)) && citableNow(c)))
 const related = computed(() => rawRelated.value.filter((d) => canViewDoc(d, auth.user?.id, null, grantOf(d)) && citableNow(d)))
 // 已渲染答案中被收回的引用数（限时授权撤销/到期、知识保鲜暂停、知识退役导致）
@@ -57,6 +61,13 @@ const retiredCount = computed(() => rawCites.value.filter((c) =>
   canViewDoc(c, auth.user?.id, null, grantOf(c)) &&
   isDocCitable(c, freshTicketOf(c), freshnessStore.now) &&
   !isDocRetireCitable(c, retirementOf(c))
+).length)
+// 其中因知识纠错处理中暂停引用的篇数（已过可见性、保鲜、退役闸门）
+const correctionPausedCount = computed(() => rawCites.value.filter((c) =>
+  canViewDoc(c, auth.user?.id, null, grantOf(c)) &&
+  isDocCitable(c, freshTicketOf(c), freshnessStore.now) &&
+  isDocRetireCitable(c, retirementOf(c)) &&
+  !!correctionOf(c)
 ).length)
 // 被退役引用所指向的替代文档（提示用户转看新文档）
 // 替代文档本身也要过可见性校验：无权查看（含未登录访客）时不泄露标题
@@ -93,6 +104,9 @@ const answerText = computed(() => {
     }
     if (retiredCount.value) {
       return '该问题此前命中的内容已被知识退役（停止问答引用），请改看其指定的替代文档；如替代文档无访问权限，可在替代文档页申请权限。'
+    }
+    if (correctionPausedCount.value) {
+      return '该问题此前命中的内容正在知识纠错处置中（成员提交错误、编辑者修订待管理员审批），问答引用已暂停。修订审批通过回写版本后会自动恢复引用。'
     }
     return '该问题此前命中的内容来自限时授权文档，授权已撤销或到期，相关正文已同步收回。如需继续查看，请重新申请访问后再提问。'
   }
@@ -149,19 +163,23 @@ function answering() {
     let pausedHits = 0
     // 可见但已知识退役的命中：不作为引用来源，单独统计并引导转看替代文档
     let retiredHitCount = 0
-    // 权限：撤销/到期的授权文档不再作为问答引用来源；知识保鲜到期/复核中、知识退役的文档均不参与问答引用
+    // 可见但正在知识纠错处置中的命中：不作为引用来源，统计后给出针对性提示
+    let correctionHitCount = 0
+    // 权限：撤销/到期的授权文档不再作为问答引用来源；知识保鲜到期/复核中、知识退役、知识纠错处理中的文档均不参与问答引用
     const hits = kb.docs
       .filter((d) => canViewDoc(d, auth.user?.id, null, grantOf(d)))
       .map((d) => {
         const bodyText = stripHtml(d.body)
         const freshOk = isDocCitable(d, freshTicketOf(d), freshnessStore.now)
         const retireOk = isDocRetireCitable(d, retirementOf(d))
+        const correctionOk = !correctionOf(d)
         return {
           doc: d,
           bodyText,
           retired: !retireOk,
-          citable: freshOk && retireOk,
+          citable: freshOk && retireOk && correctionOk,
           freshPaused: !freshOk,
+          correctionPaused: freshOk && retireOk && !correctionOk,
           score: scoreDoc(d, keywords, tagNames, bodyText)
         }
       })
@@ -170,6 +188,7 @@ function answering() {
 
     pausedHits = hits.filter((x) => x.freshPaused && !x.retired).length
     retiredHitCount = hits.filter((x) => x.retired).length
+    correctionHitCount = hits.filter((x) => x.correctionPaused).length
     retiredHits.value = hits.filter((x) => x.retired).map((x) => x.doc)
     const citableHits = hits.filter((x) => x.citable)
 
@@ -178,15 +197,18 @@ function answering() {
       answered.value = true
       answer.value = retiredHitCount
         ? '与「' + asked.value + '」相关的内容已被知识退役、停止问答引用，请改看其指定的替代文档' + (pausedHits ? '；另有部分文档正在保鲜复核中' : '') + '。你也可以直接在文档库中查看原文。'
-        : pausedHits
-          ? '与「' + asked.value + '」相关的内容已超过复核周期、正在保鲜复核中，已暂停问答引用。待编辑者修订并经管理员复核通过后会恢复引用，你也可以直接在文档库中查看原文。'
-          : '很抱歉，知识库中暂时没有与「' + asked.value + '」直接匹配的内容。建议你换一种表述，或浏览文档库 / 使用全局搜索。'
+        : correctionHitCount
+          ? '与「' + asked.value + '」相关的内容正在知识纠错处置中（修订待管理员审批），已暂停问答引用。审批通过回写版本后会自动恢复，你也可以直接在文档库中查看原文。'
+          : pausedHits
+            ? '与「' + asked.value + '」相关的内容已超过复核周期、正在保鲜复核中，已暂停问答引用。待编辑者修订并经管理员复核通过后会恢复引用，你也可以直接在文档库中查看原文。'
+            : '很抱歉，知识库中暂时没有与「' + asked.value + '」直接匹配的内容。建议你换一种表述，或浏览文档库 / 使用全局搜索。'
       return
     }
 
     const extraNotes = []
     if (pausedHits) extraNotes.push('另有 ' + pausedHits + ' 篇相关文档因超过复核周期正在保鲜复核，暂未引用')
     if (retiredHitCount) extraNotes.push(retiredHitCount + ' 篇相关文档已知识退役，已转由替代文档承接')
+    if (correctionHitCount) extraNotes.push(correctionHitCount + ' 篇相关文档正在知识纠错处置，暂未引用')
     answer.value = '基于知识库检索，我找到与「' + asked.value + '」相关的内容，引用来源如下。' + (citableHits.length > 1 ? ' 我对其归纳后优先展示最相关的 ' + Math.min(citableHits.length, 3) + ' 篇文档。' : '') + (extraNotes.length ? '（' + extraNotes.join('；') + '）' : '')
     rawCites.value = citableHits.slice(0, 3).map((h) => ({
       ...h.doc,
@@ -230,6 +252,7 @@ onMounted(() => { retirementStore.loadAll() })
         <template v-else-if="retiredCount">🗄 {{ retiredCount }} 条引用的文档已知识退役，问答引用已停止<template v-if="retiredReplacements.length">，请改看替代文档：
           <span v-for="rep in retiredReplacements" :key="rep.id" class="rep-link" @click="router.push('/docs/' + rep.id)">《{{ rep.title }}》</span>
         </template></template>
+        <template v-else-if="correctionPausedCount">🩹 {{ correctionPausedCount }} 条引用正在知识纠错处置中（修订待审批），问答引用已暂停，审批通过回写版本后自动恢复</template>
         <template v-else>🔒 {{ revokedCount }} 条引用来自限时授权文档，授权已撤销或到期，相关正文已同步收回</template>
       </div>
 
@@ -254,6 +277,7 @@ onMounted(() => { retirementStore.loadAll() })
           <div class="cite-meta">
             分类 · {{ kb.catMap[c.categoryId]?.name }} · 更新于 {{ formatDate(c.updatedAt) }}
             <span v-if="latestRestoreInfo(c)" class="cite-restore" title="该文档当前内容来自版本恢复">↩ 已恢复至 v{{ latestRestoreInfo(c).fromVersion }}</span>
+            <span v-if="auth.user" class="cite-correction" @click.stop="router.push({ path: '/corrections', query: { doc: c.id } })">🩹 内容有误？提交纠错</span>
           </div>
         </div>
       </div>
@@ -338,6 +362,8 @@ onMounted(() => { retirementStore.loadAll() })
 .cite-snippet { color: var(--text-2); font-size: 13px; margin: 6px 0; }
 .cite-meta { color: var(--text-3); font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .cite-restore { font-size: 11px; padding: 0 8px; border-radius: 999px; background: #e0e7ff; color: #4338ca; font-weight: 600; }
+.cite-correction { margin-left: auto; font-size: 11px; color: #c026d3; cursor: pointer; font-weight: 600; white-space: nowrap; }
+.cite-correction:hover { text-decoration: underline; }
 .related { display: flex; flex-direction: column; gap: 6px; }
 .rel { display: flex; justify-content: space-between; padding: 9px 12px; border-radius: 8px; cursor: pointer; background: var(--panel-2); }
 .rel:hover { background: var(--primary-weak); }

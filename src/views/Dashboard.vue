@@ -5,15 +5,18 @@ import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useEngagementStore } from '@/stores/engagement'
 import { useAccessStore } from '@/stores/access'
+import { useCorrectionStore } from '@/stores/correction'
 import DocPill from '@/components/common/DocPill.vue'
 import { formatDate, avatarColor } from '@/utils/format'
 import { canEditContent, canViewDoc } from '@/utils/permission'
+import { correctionTypeLabel, correctionStatusLabel, correctionStatusCls } from '@/utils/correction'
 
 const router = useRouter()
 const kb = useKbStore()
 const auth = useAuthStore()
 const engagement = useEngagementStore()
 const accessStore = useAccessStore()
+const correctionStore = useCorrectionStore()
 
 const docById = computed(() => Object.fromEntries(kb.docs.map((d) => [d.id, d])))
 // 仅保留当前用户可查看的文档（含有效限时授权；撤销/到期后从首页各列表收回）
@@ -32,6 +35,25 @@ const latest = computed(() => [...visibleDocs.value].sort((a, b) => new Date(b.u
 const collab = computed(() => visibleDocs.value.filter((d) => (d.editors?.length || 0) > 1).sort((a, b) => new Date(b.updatedAt) - new Date(a.updatedAt)).slice(0, 6))
 const catOverview = computed(() => kb.categories.map((c) => ({ c, n: visibleDocs.value.filter((d) => d.categoryId === c.id).length })))
 const canEdit = computed(() => canEditContent(auth.user?.role))
+
+// 知识纠错闭环概览（仅统计关联文档当前可见的工单，避免从标题推断受限内容）
+const visibleCorrections = computed(() =>
+  correctionStore.tickets.filter((t) => {
+    const d = docById.value[t.docId]
+    return d && canViewDoc(d, auth.user?.id, null, accessStore.grantOf(d.id, auth.user?.id))
+  })
+)
+const myCorrections = computed(() =>
+  [...correctionStore.ticketsSubmittedBy(auth.user?.id)]
+    .filter((t) => ['open', 'claimed', 'in_review'].includes(t.status))
+    .slice(0, 4)
+)
+const correctionTodo = computed(() =>
+  [...visibleCorrections.value]
+    .filter((t) => (canEdit.value && t.status === 'open') || (auth.user?.role === 'admin' && t.status === 'in_review'))
+    .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+    .slice(0, 4)
+)
 </script>
 
 <template>
@@ -96,6 +118,31 @@ const canEdit = computed(() => canEditContent(auth.user?.role))
       </div>
     </section>
 
+    <section v-if="myCorrections.length || correctionTodo.length" class="cor-sec">
+      <div class="sec-title-row">
+        <div class="sec-title">🩹 知识纠错处置</div>
+        <button class="btn sm ghost" @click="router.push('/corrections')">前往纠错中心 →</button>
+      </div>
+      <div class="cor-grid">
+        <div v-if="myCorrections.length" class="card cor-col">
+          <div class="cor-col-title">我提交的 · 处理中</div>
+          <div v-for="t in myCorrections" :key="t.id" class="cor-row" @click="router.push('/corrections')">
+            <span class="cor-type">{{ correctionTypeLabel(t.type) }}</span>
+            <span class="cor-sum">{{ t.summary }}</span>
+            <span class="st" :class="correctionStatusCls(t.status)">{{ correctionStatusLabel(t.status) }}</span>
+          </div>
+        </div>
+        <div v-if="correctionTodo.length" class="card cor-col">
+          <div class="cor-col-title">{{ auth.user?.role === 'admin' ? '待我处理 · 认领/审批' : '待我认领修订' }}</div>
+          <div v-for="t in correctionTodo" :key="t.id" class="cor-row" @click="router.push('/corrections')">
+            <span class="cor-type">{{ correctionTypeLabel(t.type) }}</span>
+            <span class="cor-sum">{{ t.summary }}</span>
+            <span class="st" :class="correctionStatusCls(t.status)">{{ correctionStatusLabel(t.status) }}</span>
+          </div>
+        </div>
+      </div>
+    </section>
+
     <section class="cat-sec">
       <div class="sec-title">按分类浏览</div>
       <div class="cat-grid">
@@ -140,4 +187,22 @@ const canEdit = computed(() => canEditContent(auth.user?.role))
 .cat .ico { font-size: 20px; width: 28px; height: 28px; display: grid; place-items: center; background: var(--primary-weak); border-radius: 8px; color: var(--primary); }
 .cat .cname { font-weight: 600; flex: 1; }
 .cat .cnum { color: var(--text-3); font-size: 12px; }
+
+/* 知识纠错 */
+.cor-sec { margin: 28px 0; }
+.sec-title-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+.cor-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 16px; }
+.cor-col { padding: 12px 16px; }
+.cor-col-title { font-size: 12px; color: var(--text-3); font-weight: 600; margin-bottom: 6px; }
+.cor-row { display: flex; align-items: center; gap: 8px; padding: 9px 4px; border-bottom: 1px solid var(--panel-2); cursor: pointer; font-size: 13px; }
+.cor-row:last-child { border-bottom: none; }
+.cor-row:hover { color: #c026d3; }
+.cor-type { font-size: 11px; color: #c026d3; background: #faf5ff; border: 1px solid #e9d5ff; border-radius: 6px; padding: 1px 7px; white-space: nowrap; }
+.cor-sum { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.st { font-size: 11px; padding: 1px 9px; border-radius: 999px; white-space: nowrap; }
+.st-open { background: #fef3c7; color: #b45309; }
+.st-claimed { background: var(--primary-weak); color: var(--primary); }
+.st-in_review, .st-review { background: #e0f2fe; color: #0369a1; }
+.st-resolved { background: #dcfce7; color: #15803d; }
+.st-revoked { background: var(--panel-2); color: var(--text-3); }
 </style>

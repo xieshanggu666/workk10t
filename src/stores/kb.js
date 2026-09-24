@@ -192,7 +192,7 @@ export const useKbStore = defineStore('kb', () => {
   async function deleteDoc(id, currentUser) {
     const userId = currentUser?.id || GUEST_ID
     let result = { status: 'ok' }
-    await db.transaction('rw', db.docs, db.comments, db.shares, db.reviews, db.accessRequests, db.gapTickets, db.freshnessTickets, db.retirements, async () => {
+    await db.transaction('rw', db.docs, db.comments, db.shares, db.reviews, db.accessRequests, db.gapTickets, db.freshnessTickets, db.retirements, db.correctionTickets, async () => {
       const doc = await db.docs.get(id)
       if (!doc) { result = { status: 'missing' }; return }
       const pendingReview = await db.reviews
@@ -232,12 +232,31 @@ export const useKbStore = defineStore('kb', () => {
           timeline: [...(t.timeline || []), buildTimelineEntry('reset', 'system', '关联文档已删除，工单退回处理', now)]
         })
       }
+      // 关联该文档的纠错单随文档删除自动关闭（终态保留，向提交人说明；问答引用闸门同步解除）
+      const openCorrections = await db.correctionTickets
+        .filter((t) => t.docId === id && (t.status === 'open' || t.status === 'claimed' || t.status === 'in_review')).toArray()
+      for (const t of openCorrections) {
+        await db.correctionTickets.update(t.id, {
+          status: 'revoked',
+          reviewId: null,
+          decidedBy: 'system',
+          decidedAt: now,
+          closeNote: '关联文档已删除，纠错单自动关闭',
+          timeline: [...(t.timeline || []), buildTimelineEntry('reset', 'system', '关联文档已删除，纠错单自动关闭', now)]
+        })
+      }
     })
     comments.value = comments.value.filter((c) => c.docId !== id)
     const gap = useGapStore()
     const { useFreshnessStore } = await import('./freshness')
+    const { useCorrectionStore } = await import('./correction')
     const freshness = useFreshnessStore()
-    await Promise.all([reloadDocs(), gap.reload(), freshness.loaded ? freshness.reload() : Promise.resolve()])
+    const correction = useCorrectionStore()
+    await Promise.all([
+      reloadDocs(), gap.reload(),
+      freshness.loaded ? freshness.reload() : Promise.resolve(),
+      correction.loaded ? correction.reload() : Promise.resolve()
+    ])
     return result
   }
 
