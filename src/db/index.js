@@ -99,6 +99,15 @@ export class KnowledgeDB extends Dexie {
       batchJobs: 'id, module, action, refId, status, createdAt, heartbeatAt',
       batchJobItems: 'id, jobId, status, entityId, [jobId+index]'
     })
+    // v13：知识纠错处置闭环
+    // - correctionTickets：成员提交文档错误并关联文档（submitted 待处理 → claimed 修订中 →
+    //   in_review 送审中 → resolved 已解决 / withdrawn 提交人撤回）；编辑者认领后修订送审，
+    //   复用评审单锁定/审批通道，审批通过同事务回写新版本并把版本号回填工单（问答引用随即指向新版）；
+    //   评审驳回/修订人撤回评审退回修订中；提交人在待处理/修订中可撤回，修订人可退回补充信息，
+    //   关联文档删除时退回待处理并清空关联。timeline 随记录读写全程留痕。
+    this.version(13).stores({
+      correctionTickets: 'id, status, docId, createdBy, claimedBy, reviewId, createdAt'
+    })
   }
 }
 

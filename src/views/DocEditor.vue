@@ -6,10 +6,12 @@ import { useAuthStore } from '@/stores/auth'
 import { useReviewStore } from '@/stores/review'
 import { useAccessStore } from '@/stores/access'
 import { useFreshnessStore } from '@/stores/freshness'
+import { useCorrectionStore } from '@/stores/correction'
 import { useRetirementStore } from '@/stores/retirement'
 import RichEditor from '@/components/doc/RichEditor.vue'
 import { docVersion, fieldLabels } from '@/utils/version'
 import { canEditDoc, ROLE, GUEST_ID } from '@/utils/permission'
+import { CORRECTION } from '@/utils/correction'
 
 const route = useRoute()
 const router = useRouter()
@@ -18,10 +20,16 @@ const auth = useAuthStore()
 const reviewStore = useReviewStore()
 const accessStore = useAccessStore()
 const freshnessStore = useFreshnessStore()
+const correctionStore = useCorrectionStore()
 const retirementStore = useRetirementStore()
 
 const isEdit = computed(() => route.params.id && route.params.id !== 'new')
 const editingDoc = ref(null)
+
+// 纠错单 id：以「纠错修订」模式进入时携带，提交即关联该纠错单送审，审批通过回写版本并结案
+const correctionTicketId = computed(() => route.query.correctionReview || '')
+// 纠错修订模式下当前纠错单（必须为本人修订中，否则回退直接保存模式）
+const correctionTicket = ref(null)
 
 const title = ref('')
 const categoryId = ref('')
@@ -34,8 +42,9 @@ const backupKey = 'kb:conflict-backup:' + route.params.id
 const savedToast = ref('')
 const saving = ref(false)
 // 提交模式：save 直接保存为新版本（原行为）；review 保存即发起评审，审批通过后才发布；
-// fresh 知识保鲜整改：修订后送当轮复核，管理员复核通过恢复引用并重算周期
-const submitMode = ref(route.query.freshReview ? 'fresh' : route.query.submitReview ? 'review' : 'save')
+// fresh 知识保鲜整改：修订后送当轮复核，管理员复核通过恢复引用并重算周期；
+// correction 知识纠错修订：修订后关联纠错单送审，管理员审批通过回写新版本并结案、问答引用指向新版
+const submitMode = ref(route.query.freshReview ? 'fresh' : route.query.correctionReview ? 'correction' : route.query.submitReview ? 'review' : 'save')
 const reviewNote = ref('')
 // 知识保鲜当前流转复核单（fresh 模式下送审目标）
 const freshTicket = ref(null)
@@ -115,6 +124,27 @@ async function submit(force = false) {
   try {
     const payload = { title: title.value.trim(), categoryId: categoryId.value, tagIds: [...tagIds.value], visibility: visibility.value, body: body.value }
     if (isEdit.value) {
+      // 知识纠错修订：修订内容关联纠错单送审，管理员审批通过后回写新版本并回填纠错单（问答引用指向新版）
+      if (submitMode.value === 'correction') {
+        const ticketId = correctionTicketId.value
+        const res = await reviewStore.submitCorrectionReview(ticketId, route.params.id, payload, reviewNote.value.trim(), auth.user)
+        if (res.status === 'ok') {
+          dismissBackup()
+          localStorage.removeItem(draftKey)
+          router.push({ path: '/corrections', query: { submitted: '1' } })
+        } else if (res.status === 'duplicate') {
+          alert('该文档已有流转中的评审单，请等待管理员处理。')
+        } else if (res.status === 'ticket-changed' || res.status === 'ticket-missing') {
+          alert('纠错单状态已变化（可能已被撤回或退回），请返回纠错中心刷新查看。')
+        } else if (res.status === 'doc-missing') {
+          alert('文档不存在或已被删除')
+        } else if (res.status === 'guest') {
+          alert('访客不能发起纠错修订，请先登录。')
+        } else {
+          alert('你没有该文档的修订送审权限：仅拥有者、协作成员或管理员可送审。')
+        }
+        return
+      }
       // 知识保鲜整改：修订内容作为当轮复核快照送审，管理员复核通过后恢复引用并重算周期
       if (submitMode.value === 'fresh') {
         const res = await freshnessStore.submitFreshReview(route.params.id, payload, reviewNote.value.trim(), false, auth.user)
@@ -222,6 +252,15 @@ async function load() {
     if (route.query.freshReview && (!freshTicket.value || freshTicket.value.status === 'submitted')) {
       submitMode.value = 'save'
     }
+    // 知识纠错：取关联纠错单，correction 模式失效（非本人修订中/已送审/撤回）时回退直接保存模式
+    await correctionStore.loadAll()
+    correctionTicket.value = correctionTicketId.value
+      ? correctionStore.tickets.find((t) => t.id === correctionTicketId.value) || null
+      : null
+    if (route.query.correctionReview && (!correctionTicket.value || correctionTicket.value.status !== CORRECTION.CLAIMED ||
+        (correctionTicket.value.claimedBy !== auth.user?.id && auth.user?.role !== ROLE.ADMIN))) {
+      submitMode.value = 'save'
+    }
     // 编辑权限：拥有者/固定协作成员/持有效限时协作授权；授权撤销或到期后进入即被收回；
     // 已退役文档为只读归档，任何身份都不可再编辑（需先撤销退役）
     await retirementStore.loadAll()
@@ -288,15 +327,16 @@ const editableNow = computed(() => !lockedByReview.value && !accessDenied.value)
       <span class="toast">{{ savedToast }}</span>
       <div class="spacer"></div>
       <template v-if="isEdit && !lockedByReview && !accessDenied">
-        <div class="mode-seg" v-if="!isGrantOnly" title="直接保存立即生效；发起评审/保鲜复核则由管理员审批通过后发布">
+        <div class="mode-seg" v-if="!isGrantOnly" title="直接保存立即生效；发起评审/保鲜复核/纠错修订则由管理员审批通过后发布">
           <button :class="{ on: submitMode === 'save' }" @click="submitMode = 'save'">直接保存</button>
           <button :class="{ on: submitMode === 'review' }" @click="submitMode = 'review'">发起评审</button>
           <button v-if="freshTicket && freshTicket.status !== 'submitted'" :class="{ on: submitMode === 'fresh' }" @click="submitMode = 'fresh'">🧊 保鲜整改</button>
+          <button v-if="correctionTicket && correctionTicket.status === 'claimed'" :class="{ on: submitMode === 'correction' }" @click="submitMode = 'correction'">🐞 纠错修订</button>
         </div>
         <span v-else class="grant-hint" title="限时协作授权：可直接编辑保存，审批发布由文档编辑者发起">🔑 限时协作授权中</span>
         <button class="btn" @click="manualSave">保存草稿</button>
         <button class="btn primary" :disabled="!canPublish || saving" @click="submit()">
-          {{ saving ? '提交中…' : (submitMode === 'fresh' ? '提交保鲜复核' : submitMode === 'review' ? '提交评审' : isEdit ? '保存变更' : '发布文档') }}
+          {{ saving ? '提交中…' : (submitMode === 'fresh' ? '提交保鲜复核' : submitMode === 'correction' ? '提交纠错修订' : submitMode === 'review' ? '提交评审' : isEdit ? '保存变更' : '发布文档') }}
         </button>
       </template>
     </div>
@@ -374,10 +414,11 @@ const editableNow = computed(() => !lockedByReview.value && !accessDenied.value)
         </div>
       </div>
 
-      <div v-if="isEdit && (submitMode === 'review' || submitMode === 'fresh') && !lockedByReview && !isGrantOnly" class="field">
-        <label class="rv-label">{{ submitMode === 'fresh' ? '保鲜复核说明' : '评审说明' }}</label>
-        <textarea v-model="reviewNote" rows="2" :placeholder="submitMode === 'fresh' ? '向管理员说明本次保鲜修订要点（会作为复核意见留痕，可选）' : '向管理员说明本次修改要点（会作为首条评审意见留痕，可选）'"></textarea>
+      <div v-if="isEdit && (submitMode === 'review' || submitMode === 'fresh' || submitMode === 'correction') && !lockedByReview && !isGrantOnly" class="field">
+        <label class="rv-label">{{ submitMode === 'fresh' ? '保鲜复核说明' : submitMode === 'correction' ? '纠错修订说明' : '评审说明' }}</label>
+        <textarea v-model="reviewNote" rows="2" :placeholder="submitMode === 'fresh' ? '向管理员说明本次保鲜修订要点（会作为复核意见留痕，可选）' : submitMode === 'correction' ? '向管理员说明本次纠错修订要点，如修正了哪些错误内容（会作为首条评审意见留痕，可选）' : '向管理员说明本次修改要点（会作为首条评审意见留痕，可选）'"></textarea>
         <div class="rv-hint" v-if="submitMode === 'fresh'">提交后进入「保鲜复核中」并锁定正文，管理员复核通过后修订生效、问答引用恢复并按周期重新计时；驳回则继续整改。</div>
+        <div class="rv-hint" v-else-if="submitMode === 'correction'">提交后纠错单进入「送审中」并锁定正文，管理员审批通过后修订回写为新版本、纠错单结案并通知提交人，问答引用随即指向修订内容；驳回则退回继续修订。</div>
         <div class="rv-hint" v-else>提交后文档进入「评审中」并锁定当前正文，审批通过后以上内容与可见性才会生效。</div>
       </div>
     </div>

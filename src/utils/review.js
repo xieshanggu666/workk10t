@@ -35,6 +35,11 @@ export function isFreshNoChangeReview(review) {
   return isFreshReview(review) && !!review.freshNoChange
 }
 
+// 评审单是否为知识纠错修订评审（correctionTicketId 关联纠错单；审批通过回写新版本并联动结案）
+export function isCorrectionReview(review) {
+  return !!review?.correctionTicketId
+}
+
 // 文档是否处于评审中（存在待审批评审单时锁定正文）
 export function isDocInReview(doc, pendingReview) {
   if (!doc) return false
@@ -116,6 +121,7 @@ export function timelineActionLabel(action) {
     'restore-submit': '发起恢复评审',
     'fresh-submit': '保鲜复核送审（修订）',
     'fresh-submit-nochange': '保鲜复核送审（确认无需修订）',
+    'correction-submit': '纠错修订送审',
     comment: '发表评审意见',
     approve: '审批通过',
     reject: '审批驳回',

@@ -13,6 +13,7 @@ import DocPill from '@/components/common/DocPill.vue'
 import MemberSelect from '@/components/common/MemberSelect.vue'
 import ShareDialog from '@/components/doc/ShareDialog.vue'
 import ReviewPanel from '@/components/doc/ReviewPanel.vue'
+import CorrectionPanel from '@/components/doc/CorrectionPanel.vue'
 import FreshnessPanel from '@/components/doc/FreshnessPanel.vue'
 import RetirementPanel from '@/components/doc/RetirementPanel.vue'
 import AccessApplyCard from '@/components/doc/AccessApplyCard.vue'
@@ -280,6 +281,7 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
             <span class="vnote">{{ v.note || '编辑' }}</span>
             <span v-if="versionReviewBadge(v)" class="vbadge" :class="'vb-' + versionReviewBadge(v).cls">{{ versionReviewBadge(v).text }}</span>
             <span v-if="freshVersionBadge(v)" class="vbadge vb-fresh">{{ freshVersionBadge(v).text }}</span>
+            <span v-if="v.correction" class="vbadge vb-cor" :title="'纠错单 ' + v.correction.ticketId">🐞 纠错修订</span>
             <span v-for="b in versionRestoreBadges(v)" :key="b.text" class="vbadge" :class="'vb-' + b.cls">{{ b.text }}</span>
             <span v-if="!v.snapshot" class="vnosnap" title="旧版本记录未保存内容快照，无法对比或恢复">无快照</span>
           </div>
@@ -343,6 +345,8 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
       </div>
 
       <ReviewPanel :doc="doc" />
+
+      <CorrectionPanel :doc="doc" />
 
       <FreshnessPanel :doc="doc" />
 
@@ -472,5 +476,6 @@ watch(docId, () => { if (route.name === 'docDetail') { refresh(); showVersions.v
 .vb-no { background: #fee2e2; color: #b91c1c; }
 .vb-wait { background: #fef3c7; color: #b45309; }
 .vb-fresh { background: #cffafe; color: #0e7490; }
+.vb-cor { background: #ffe4e6; color: #be123c; }
 .c-review-tag { font-size: 10px; padding: 1px 7px; border-radius: 999px; background: var(--primary-weak); color: var(--primary); }
 </style>

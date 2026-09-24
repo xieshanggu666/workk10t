@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { useKbStore } from '@/stores/kb'
 import { useAuthStore } from '@/stores/auth'
 import { useGapStore } from '@/stores/gap'
+import { useCorrectionStore } from '@/stores/correction'
 import { useAccessStore } from '@/stores/access'
 import { useFreshnessStore } from '@/stores/freshness'
 import { useRetirementStore } from '@/stores/retirement'
@@ -21,6 +22,7 @@ const router = useRouter()
 const kb = useKbStore()
 const auth = useAuthStore()
 const gapStore = useGapStore()
+const correctionStore = useCorrectionStore()
 const accessStore = useAccessStore()
 const freshnessStore = useFreshnessStore()
 const retirementStore = useRetirementStore()
@@ -103,6 +105,55 @@ const answerText = computed(() => {
 const gapFormOpen = ref(false)
 const gapDetail = ref('')
 
+// ---- 知识纠错联动：引用出处报错（关联该文档提交纠错单）----
+const corFormDoc = ref(null) // 正在填写报错表单的引用文档
+const corType = ref('factual')
+const corDesc = ref('')
+const corExpected = ref('')
+const corBusy = ref(false)
+const COR_TYPES = [
+  { key: 'factual', label: '事实错误' },
+  { key: 'outdated', label: '内容过时' },
+  { key: 'typo', label: '错别字/表述' },
+  { key: 'broken', label: '链接/代码失效' },
+  { key: 'other', label: '其他' }
+]
+// 已提交过纠错的引用文档（本次提问内即时反馈，避免重复提交）
+const corSubmittedDocIds = ref(new Set())
+// 该引用文档上当前用户已有的在途纠错单（进入页面时展示「可追踪」）
+function myOpenCorrectionOf(docId) {
+  return correctionStore.myOpenTicketForDoc(docId, auth.user?.id)
+}
+
+function openCorForm(c) {
+  corFormDoc.value = c
+  corType.value = 'factual'
+  corDesc.value = ''
+  corExpected.value = ''
+}
+
+async function submitCorrection() {
+  const desc = corDesc.value.trim()
+  if (!desc || !corFormDoc.value || corBusy.value) return
+  corBusy.value = true
+  try {
+    const res = await correctionStore.createTicket({
+      docId: corFormDoc.value.id, type: corType.value, description: desc,
+      expected: corExpected.value.trim(), source: 'qa'
+    }, auth.user)
+    if (res.status === 'ok' || res.status === 'duplicate') {
+      corSubmittedDocIds.value = new Set([...corSubmittedDocIds.value, corFormDoc.value.id])
+      corFormDoc.value = null
+      corDesc.value = ''
+      corExpected.value = ''
+    } else if (res.status === 'guest') {
+      alert('访客不能提交纠错，请先登录。')
+    }
+  } finally {
+    corBusy.value = false
+  }
+}
+
 const activeTicket = computed(() => (asked.value ? gapStore.activeTicketForQuestion(asked.value) : null))
 // 已解决工单中匹配本问题的答案来源（审批发布后自动回填，此处对提问者可见）
 // 回填来源同样过文档可见性：无权查看（含未登录访客）时不泄露文档标题
@@ -141,6 +192,8 @@ function answering() {
   retiredHits.value = []
   gapFormOpen.value = false
   gapDetail.value = ''
+  corFormDoc.value = null
+  corSubmittedDocIds.value = new Set()
 
   setTimeout(() => {
     const keywords = extractKeywords(asked.value)
@@ -245,15 +298,35 @@ onMounted(() => { retirementStore.loadAll() })
 
       <div v-if="cites.length" class="cites">
         <div class="block-title">📎 引用出处</div>
-        <div v-for="c in cites" :key="c.id" class="cite" @click="router.push('/docs/' + c.id)">
-          <div class="cite-head">
+        <div v-for="c in cites" :key="c.id" class="cite">
+          <div class="cite-head" @click="router.push('/docs/' + c.id)">
             <span class="cite-score" v-if="c.score >= 5">★ 高相关</span>
             <span class="cite-title" v-html="highlightTitle(c.title, extractKeywords(asked))"></span>
           </div>
-          <div class="cite-snippet" v-html="highlightText(c.snippet, extractKeywords(asked))"></div>
+          <div class="cite-snippet" @click="router.push('/docs/' + c.id)" v-html="highlightText(c.snippet, extractKeywords(asked))"></div>
           <div class="cite-meta">
-            分类 · {{ kb.catMap[c.categoryId]?.name }} · 更新于 {{ formatDate(c.updatedAt) }}
+            <span @click="router.push('/docs/' + c.id)">分类 · {{ kb.catMap[c.categoryId]?.name }} · 更新于 {{ formatDate(c.updatedAt) }}</span>
             <span v-if="latestRestoreInfo(c)" class="cite-restore" title="该文档当前内容来自版本恢复">↩ 已恢复至 v{{ latestRestoreInfo(c).fromVersion }}</span>
+            <!-- 引用报错：内容疑似有误时关联该文档提交纠错，编辑者修订审批后回写新版本 -->
+            <span class="cite-cor">
+              <template v-if="corFormDoc?.id === c.id">
+                <span class="cor-inline">
+                  <select v-model="corType">
+                    <option v-for="tp in COR_TYPES" :key="tp.key" :value="tp.key">{{ tp.label }}</option>
+                  </select>
+                  <input v-model="corDesc" placeholder="描述引用中的错误…" @keyup.enter="submitCorrection" />
+                  <button class="btn xs primary" :disabled="!corDesc.trim() || corBusy" @click="submitCorrection">提交</button>
+                  <button class="btn xs ghost" @click="corFormDoc = null">取消</button>
+                </span>
+              </template>
+              <template v-else-if="corSubmittedDocIds.has(c.id) || myOpenCorrectionOf(c.id)">
+                <span class="cor-ok" @click="router.push('/corrections')">🐞 已报错 · 可追踪 →</span>
+              </template>
+              <template v-else-if="auth.user && correctionStore.ticketsOfDoc(c.id).some((t) => t.createdBy === auth.user.id && t.status === 'resolved')">
+                <span class="cor-fixed" @click="router.push('/corrections')">🐞 我的报错已修订 →</span>
+              </template>
+              <a v-else-if="auth.user" class="cor-link" @click.stop="openCorForm(c)">🐞 内容有误？报错</a>
+            </span>
           </div>
         </div>
       </div>
@@ -332,11 +405,21 @@ onMounted(() => { retirementStore.loadAll() })
 .cites { display: flex; flex-direction: column; gap: 10px; }
 .cite { border: 1px solid var(--border); border-radius: 10px; padding: 12px 16px; cursor: pointer; }
 .cite:hover { border-color: var(--primary); }
-.cite-head { display: flex; align-items: center; gap: 8px; }
+.cite-head { display: flex; align-items: center; gap: 8px; cursor: pointer; }
 .cite-score { background: var(--primary-weak); color: var(--primary); font-size: 11px; padding: 1px 8px; border-radius: 999px; }
 .cite-title { font-weight: 700; }
-.cite-snippet { color: var(--text-2); font-size: 13px; margin: 6px 0; }
+.cite-snippet { color: var(--text-2); font-size: 13px; margin: 6px 0; cursor: pointer; }
 .cite-meta { color: var(--text-3); font-size: 12px; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.cite-meta > span:first-child { cursor: pointer; }
+.cite-cor { margin-left: auto; display: inline-flex; align-items: center; }
+.cor-link { color: #b91c1c; cursor: pointer; font-size: 12px; }
+.cor-link:hover { text-decoration: underline; }
+.cor-ok { color: #15803d; font-size: 12px; cursor: pointer; }
+.cor-fixed { color: #0e7490; font-size: 12px; cursor: pointer; }
+.cor-inline { display: inline-flex; gap: 4px; align-items: center; }
+.cor-inline select, .cor-inline input { font-size: 12px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 6px; outline: none; background: var(--panel); color: var(--text); }
+.cor-inline input { width: 170px; }
+.btn.xs { padding: 2px 10px; font-size: 12px; }
 .cite-restore { font-size: 11px; padding: 0 8px; border-radius: 999px; background: #e0e7ff; color: #4338ca; font-weight: 600; }
 .related { display: flex; flex-direction: column; gap: 6px; }
 .rel { display: flex; justify-content: space-between; padding: 9px 12px; border-radius: 8px; cursor: pointer; background: var(--panel-2); }

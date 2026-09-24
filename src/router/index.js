@@ -12,6 +12,7 @@ const routes = [
   { path: '/search', name: 'search', component: () => import('@/views/SearchResults.vue'), meta: { title: '搜索' } },
   { path: '/reviews', name: 'reviewCenter', component: () => import('@/views/ReviewCenter.vue'), meta: { title: '评审中心' } },
   { path: '/gaps', name: 'gapTickets', component: () => import('@/views/GapTickets.vue'), meta: { title: '缺口工单' } },
+  { path: '/corrections', name: 'correctionCenter', component: () => import('@/views/CorrectionCenter.vue'), meta: { title: '知识纠错' } },
   { path: '/access', name: 'accessCenter', component: () => import('@/views/AccessCenter.vue'), meta: { title: '访问授权' } },
   { path: '/freshness', name: 'freshnessCenter', component: () => import('@/views/FreshnessCenter.vue'), meta: { title: '知识保鲜' } },
   { path: '/handover', name: 'handoverCenter', component: () => import('@/views/HandoverCenter.vue'), meta: { title: '责任交接' } },

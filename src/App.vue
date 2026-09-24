@@ -8,6 +8,7 @@ import { useKbStore } from '@/stores/kb'
 import { useEngagementStore } from '@/stores/engagement'
 import { useReviewStore } from '@/stores/review'
 import { useGapStore } from '@/stores/gap'
+import { useCorrectionStore } from '@/stores/correction'
 import { useAccessStore } from '@/stores/access'
 import { useFreshnessStore } from '@/stores/freshness'
 import { useHandoverStore } from '@/stores/handover'
@@ -20,6 +21,7 @@ const kb = useKbStore()
 const engagement = useEngagementStore()
 const reviewStore = useReviewStore()
 const gapStore = useGapStore()
+const correctionStore = useCorrectionStore()
 const accessStore = useAccessStore()
 const freshnessStore = useFreshnessStore()
 const handoverStore = useHandoverStore()
@@ -29,7 +31,7 @@ const orchestrationStore = useOrchestrationStore()
 const isSharePage = () => route.name === 'share'
 
 onMounted(async () => {
-  await Promise.all([auth.loadUsers(), kb.loadAll(), reviewStore.loadAll(), gapStore.loadAll(), accessStore.loadAll(), freshnessStore.loadAll(), handoverStore.loadAll(), retirementStore.loadAll(), orchestrationStore.loadAll()])
+  await Promise.all([auth.loadUsers(), kb.loadAll(), reviewStore.loadAll(), gapStore.loadAll(), correctionStore.loadAll(), accessStore.loadAll(), freshnessStore.loadAll(), handoverStore.loadAll(), retirementStore.loadAll(), orchestrationStore.loadAll()])
   // 接管崩溃/刷新前未跑完的分批编排作业（心跳超时，逐篇幂等断点续跑）
   await orchestrationStore.resumeStale()
   // 默认以管理员登录，便于完整演示；可通过「账号与权限」切换角色

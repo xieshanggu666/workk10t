@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/auth'
 import { useEngagementStore } from '@/stores/engagement'
 import { useReviewStore } from '@/stores/review'
 import { useGapStore } from '@/stores/gap'
+import { useCorrectionStore } from '@/stores/correction'
 import { useAccessStore } from '@/stores/access'
 import { useFreshnessStore } from '@/stores/freshness'
 import { useHandoverStore } from '@/stores/handover'
@@ -20,6 +21,7 @@ const auth = useAuthStore()
 const engagement = useEngagementStore()
 const reviewStore = useReviewStore()
 const gapStore = useGapStore()
+const correctionStore = useCorrectionStore()
 const accessStore = useAccessStore()
 const freshnessStore = useFreshnessStore()
 const handoverStore = useHandoverStore()
@@ -86,6 +88,9 @@ function goDoc(id) {
       </div>
       <div class="link" :class="{ on: route.name === 'gapTickets' }" @click="go('/gaps', {})">
         📮 缺口工单<span v-if="gapStore.openCount" class="link-badge">{{ gapStore.openCount }}</span>
+      </div>
+      <div class="link" :class="{ on: route.name === 'correctionCenter' }" @click="go('/corrections', {})">
+        🐞 知识纠错<span v-if="correctionStore.openCount" class="link-badge cor-badge">{{ correctionStore.openCount }}</span>
       </div>
       <div class="link" :class="{ on: route.name === 'accessCenter' }" @click="go('/access', {})">
         🔑 访问授权<span v-if="accessPending" class="link-badge">{{ accessPending }}</span>
@@ -168,6 +173,7 @@ function goDoc(id) {
 .link { position: relative; }
 .link-badge { margin-left: 6px; background: var(--danger); color: #fff; font-size: 11px; border-radius: 999px; padding: 0 7px; min-width: 18px; height: 16px; display: inline-grid; place-items: center; }
 .link-badge.fresh-badge { background: #0e7490; }
+.link-badge.cor-badge { background: #b91c1c; }
 
 .section { margin: 4px 0 14px; }
 .section-title { font-size: 12px; color: var(--text-3); padding: 0 12px; margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.5px; }
